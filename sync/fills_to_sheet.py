@@ -23,23 +23,43 @@ def h(ts, s):  # headers
         "Content-Type": "application/json"
     }
 
-def get_fills(symbol, start_ms, end_ms):
-    # tenta v1 e v2 (Bitget alterna versões)
-    candidates = [
-        ("/api/mix/v1/order/fills", {"symbol": symbol, "startTime": start_ms, "endTime": end_ms}),
-        ("/api/mix/v2/order/fills", {"symbol": symbol, "startTime": start_ms, "endTime": end_ms}),
-    ]
-    for path, params in candidates:
-        ts = str(int(time.time()*1000))
+def bitget_get_all_fills(product_type: str, start_ms: int, end_ms: int):
+    """
+    Lê fills privados (conta) para USDT-M perp.
+    Endpoint correto: /api/mix/v1/order/allFills
+    Params: productType=umcbl, startTime, endTime, (opcional lastEndId para paginação)
+    """
+    path = "/api/mix/v1/order/allFills"
+    page_limit = 500  # Bitget costuma devolver até ~100/500 por página; ajuste se necessário
+    last_end_id = None
+    out = []
+
+    while True:
+        params = {"productType": product_type, "startTime": start_ms, "endTime": end_ms}
+        if last_end_id:
+            params["lastEndId"] = last_end_id
+
+        ts = str(int(time.time() * 1000))
         q = "?" + urlencode(params)
-        r = requests.get(BASE+path, params=params, headers=h(ts, sign(ts,"GET",path,q,"")), timeout=20)
-        try:
-            data = r.json()
-        except Exception:
-            continue
-        if r.status_code==200 and isinstance(data,dict) and isinstance(data.get("data"),list):
-            return data["data"]
-    raise RuntimeError(f"Erro ao buscar fills para {symbol}: {r.status_code} {r.text[:120]}")
+        sig = sign(ts, "GET", path, q, "")
+        r = requests.get(BITGET_BASE + path, params=params, headers=headers(ts, sig), timeout=20)
+
+        data = r.json() if r.headers.get("content-type","").startswith("application/json") else {}
+        if r.status_code != 200 or not isinstance(data, dict) or "data" not in data:
+            raise RuntimeError(f"allFills falhou: {r.status_code} {str(data)[:200]}")
+
+        batch = data.get("data") or []
+        out.extend(batch)
+
+        # paginação: se vier menos que o limite, acabou; senão, avança pelo último id
+        if not batch:
+            break
+        last = batch[-1]
+        last_end_id = last.get("tradeId") or last.get("fillId") or last.get("id")
+        if not last_end_id or len(batch) < page_limit:
+            break
+
+    return out
 
 def open_sheet():
     info = json.loads(os.environ["GOOGLE_SA_JSON"])
@@ -86,11 +106,15 @@ def main():
     new=[]
     for par in symbols:
         try:
-            fills = get_fills(map_symbol(par), start_ms, end_ms)
-            rows = [r for r in to_rows(fills, par) if r[-1] and r[-1] not in seen]
-            new.extend(rows)
+            fills = bitget_get_all_fills("umcbl", start_ms, end_ms)  # PRIVADO, por produto
+            # filtra só o par desejado; no allFills o campo costuma ser "symbol" = "BTCUSDT_UMCBL"
+            sym_full = map_symbol(par)  # ex.: BTCUSDT_UMCBL
+            fills = [f for f in fills if (f.get("symbol") or "").upper() == sym_full]
+            rows = [r for r in to_rows_from_fills(fills, par) if r[-1] and r[-1] not in seen]
+            new_rows.extend(rows)
+            print(f"[INFO] {par}: {len(fills)} fills (novos {len(rows)})")
         except Exception as e:
-            print("[WARN]", par, e)
+            print(f"[WARN] {par}: {e}")
     if new:
         ws.append_rows(new, value_input_option="USER_ENTERED")
     print("Novas linhas:", len(new))
