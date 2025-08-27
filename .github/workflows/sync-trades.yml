@@ -2,18 +2,30 @@ name: Sync Bitget → Google Sheets
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # roda a cada 30 min
-  workflow_dispatch: {}       # permite rodar manualmente
+    - cron: "*/30 * * * *"   # a cada 30 min
+  workflow_dispatch: {}       # rodar manualmente
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - run: pip install -r sync/requirements.txt
+
+      # Debug leve (não imprime secrets)
+      - run: |
+          echo "=== TREE ==="
+          ls -R
+          echo "Sheet name: ${SHEET_TRADES_NAME:-Trades}"
+          echo "Symbols: ${SYMBOLS:-BTCUSDT,ETHUSDT}"
+          echo "Product type: ${PRODUCT_TYPE:-umcbl}"
+          echo "DRY_RUN: ${DRY_RUN:-0}"
+
       - env:
           BITGET_API_KEY: ${{ secrets.BITGET_API_KEY }}
           BITGET_API_SECRET: ${{ secrets.BITGET_API_SECRET }}
@@ -22,4 +34,6 @@ jobs:
           SHEET_ID: ${{ secrets.SHEET_ID }}
           SHEET_TRADES_NAME: ${{ secrets.SHEET_TRADES_NAME }}
           SYMBOLS: ${{ secrets.SYMBOLS }}
+          PRODUCT_TYPE: ${{ secrets.PRODUCT_TYPE }}
+          DRY_RUN: ${{ secrets.DRY_RUN }}
         run: python sync/fills_to_sheet.py
