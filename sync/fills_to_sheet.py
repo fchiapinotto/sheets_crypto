@@ -5,19 +5,25 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # =========================
-# CONFIG
+# CONFIG (com fallbacks robustos)
 # =========================
 BITGET_BASE = "https://api.bitget.com"
-PRODUCT_TYPE = os.getenv("PRODUCT_TYPE", "umcbl").lower()  # usdt-m perp = umcbl; usdc-m = cmcbl; coin-m = dmcbl
-SHEET_NAME_ENV = os.getenv("SHEET_TRADES_NAME", "Trades")
-SYMBOLS_ENV = os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT")
-DRY_RUN = os.getenv("DRY_RUN", "0") == "1"
+PRODUCT_TYPE = (os.getenv("PRODUCT_TYPE") or "umcbl").lower()     # usdt-m perp = umcbl
+SHEET_NAME_ENV = (os.getenv("SHEET_TRADES_NAME") or "Trades")
+SYMBOLS_ENV = (os.getenv("SYMBOLS") or "BTCUSDT,ETHUSDT")
+DRY_RUN = (os.getenv("DRY_RUN") or "0") == "1"
+
+# Sanitize extra (se alguém setar espaços)
+PRODUCT_TYPE = PRODUCT_TYPE.strip() or "umcbl"
+SHEET_NAME_ENV = SHEET_NAME_ENV.strip()
+SYMBOLS_ENV = ",".join([s.strip() for s in SYMBOLS_ENV.split(",") if s.strip()]) or "BTCUSDT,ETHUSDT"
+
+print(f"[CFG] productType={PRODUCT_TYPE} sheet='{SHEET_NAME_ENV}' symbols='{SYMBOLS_ENV}' dry_run={DRY_RUN}")
 
 # =========================
 # Bitget auth helpers
 # =========================
 def sign_bitget(ts: str, method: str, path: str, query: str = "", body: str = "") -> str:
-    # Prehash = timestamp + method + requestPath + queryString + body (sem espaços)
     prehash = f"{ts}{method}{path}{query}{body}"
     secret = os.environ["BITGET_API_SECRET"].encode()
     return base64.b64encode(hmac.new(secret, prehash.encode(), hashlib.sha256).digest()).decode()
@@ -32,12 +38,9 @@ def headers(ts: str, signature: str) -> dict:
     }
 
 def map_symbol(sym: str) -> str:
-    """
-    BTCUSDT -> BTCUSDT_UMCBL (padrão perp USDT na Bitget)
-    """
+    """ BTCUSDT -> BTCUSDT_UMCBL (perp USDT) """
     s = sym.upper().replace("_", "").replace("-", "")
     suffix = {"umcbl": "UMCBL", "cmcbl": "CMCBl", "dmcbl": "DMCBL"}.get(PRODUCT_TYPE, "UMCBL")
-    # corrigir CMCBl para maiúsculo uniforme
     suffix = suffix.upper()
     if s.endswith("USDT"):
         return f"{s}_{suffix}"
@@ -48,10 +51,8 @@ def map_symbol(sym: str) -> str:
 # =========================
 def bitget_get_all_fills(product_type: str, start_ms: int, end_ms: int):
     """
-    Endpoint correto (privado): /api/mix/v1/order/allFills
-    Params obrigatórios: productType=umcbl|cmcbl|dmcbl, startTime, endTime
-    Paginação: lastEndId
-    Retorna lista de fills (trades executados) da conta.
+    /api/mix/v1/order/allFills  (privado)
+    Params: productType=umcbl|cmcbl|dmcbl, startTime, endTime, (opcional lastEndId)
     """
     path = "/api/mix/v1/order/allFills"
     out = []
@@ -60,7 +61,7 @@ def bitget_get_all_fills(product_type: str, start_ms: int, end_ms: int):
 
     while True:
         page += 1
-        params = {"productType": product_type, "startTime": start_ms, "endTime": end_ms}
+        params = {"productType": (product_type or "umcbl"), "startTime": start_ms, "endTime": end_ms}
         if last_end_id:
             params["lastEndId"] = last_end_id
 
@@ -69,9 +70,9 @@ def bitget_get_all_fills(product_type: str, start_ms: int, end_ms: int):
         sig = sign_bitget(ts, "GET", path, query, "")
         r = requests.get(BITGET_BASE + path, params=params, headers=headers(ts, sig), timeout=25)
 
-        # Parse básico
+        ct = r.headers.get("content-type", "")
         try:
-            data = r.json()
+            data = r.json() if "json" in ct else {}
         except Exception:
             raise RuntimeError(f"Resposta não JSON: {r.status_code} {r.text[:200]}")
 
@@ -81,16 +82,15 @@ def bitget_get_all_fills(product_type: str, start_ms: int, end_ms: int):
         batch = data.get("data") or []
         out.extend(batch)
 
-        # Controle de página
         if not batch:
             break
-        # pega id do último fill
+        # Paginador
         last = batch[-1]
         last_end_id = last.get("tradeId") or last.get("fillId") or last.get("id")
-        # Se não veio id ou a página está “curta”, encerra
         if not last_end_id or len(batch) < 100:
             break
 
+    print(f"[INFO] allFills: recebidos {len(out)} fills no período")
     return out
 
 # =========================
@@ -106,18 +106,15 @@ def open_sheet():
     target_env = SHEET_NAME_ENV
     target_norm = target_env.strip().lower()
 
-    # 1) tenta exato
     try:
         return sh.worksheet(target_env)
     except gspread.WorksheetNotFound:
         pass
 
-    # 2) tenta normalizado (ignora espaços/caixa)
     for ws in sh.worksheets():
         if ws.title.strip().lower() == target_norm:
             return ws
 
-    # 3) cria de fato
     ws = sh.add_worksheet(title=target_env, rows=2000, cols=20)
     ws.append_row([
         "DataHora","Par","Direção","Setup","TF","Entrada","Stop","Saída",
@@ -127,8 +124,8 @@ def open_sheet():
 
 def existing_trade_ids(ws):
     try:
-        col = ws.col_values(15)  # tradeId (coluna O)
-        return set(col[1:])      # ignora cabeçalho
+        col = ws.col_values(15)  # tradeId
+        return set(col[1:])
     except Exception:
         return set()
 
@@ -137,23 +134,20 @@ def append_rows(ws, rows):
         ws.append_rows(rows, value_input_option="USER_ENTERED")
 
 # =========================
-# Transformação: fills -> linhas do Sheet
+# Transformação: fills -> linhas
 # =========================
 def to_rows_from_fills(fills, sym_clean):
     rows = []
     for f in fills:
         trade_id = f.get("tradeId") or f.get("fillId") or f.get("id") or ""
         order_id = f.get("orderId", "")
-        # preço pode vir como price ou priceAvg
         price = float(f.get("price", f.get("priceAvg", 0)) or 0)
-        # size pode vir como size/baseVolume/fillQty
-        size = float(f.get("size", f.get("baseVolume", f.get("fillQty", 0))) or 0)
-        fee  = float(f.get("fee", 0) or 0)
-        pnl  = float(f.get("pnl", 0) or 0)
-        tsms = int(f.get("ctime", f.get("timestamp", int(time.time()*1000))))
+        size  = float(f.get("size", f.get("baseVolume", f.get("fillQty", 0))) or 0)
+        fee   = float(f.get("fee", 0) or 0)
+        pnl   = float(f.get("pnl", 0) or 0)
+        tsms  = int(f.get("ctime", f.get("timestamp", int(time.time()*1000))))
         dt_iso = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(tsms/1000))
 
-        # Direção: prioriza posSide long/short; fallback side buy/sell
         side_raw = (f.get("posSide") or f.get("side", "")).lower()
         if "long" in side_raw:
             direcao = "Long"
@@ -168,9 +162,9 @@ def to_rows_from_fills(fills, sym_clean):
 
         rows.append([
             dt_iso, sym_clean, direcao, "", "",  # DataHora, Par, Direção, Setup, TF
-            "", "", f"{price}",                  # Entrada, Stop (vazio), Saída = price exec
+            "", "", f"{price}",                  # Entrada, Stop, Saída (execução)
             f"{size}", f"{fee}", f"{pnl}",       # Qty, Taxas, PnL_USDT
-            "", "",                              # R_USDT_real, R_múltiplos (calculadas no Sheet)
+            "", "",                              # R_USDT_real, R_múltiplos
             order_id, trade_id
         ])
     return rows
@@ -182,22 +176,18 @@ def main():
     ws = open_sheet()
     seen = existing_trade_ids(ws)
 
-    # Janela de 3 dias para garantir captação (pode ajustar para 7)
     end_ms = int(time.time() * 1000)
-    start_ms = end_ms - 3 * 24 * 60 * 60 * 1000
+    start_ms = end_ms - 3 * 24 * 60 * 60 * 1000  # últimos 3 dias
 
-    # Busca UMA vez todos os fills do produto (umcbl) e filtra por símbolo
     fills_all = bitget_get_all_fills(PRODUCT_TYPE, start_ms, end_ms)
 
     symbols = [s.strip() for s in SYMBOLS_ENV.split(",") if s.strip()]
     new_rows = []
     for par in symbols:
         sym_full = map_symbol(par)  # ex.: BTCUSDT_UMCBL
-        # filtra o que é do par
         f_par = [f for f in fills_all if (f.get("symbol") or "").upper() == sym_full]
         rows = to_rows_from_fills(f_par, par)
-        # dedup por tradeId (última coluna)
-        rows = [r for r in rows if r[-1] and r[-1] not in seen]
+        rows = [r for r in rows if r[-1] and r[-1] not in seen]  # dedup por tradeId
         new_rows.extend(rows)
         print(f"[INFO] {par}: total={len(f_par)} novos={len(rows)}")
 
