@@ -3,7 +3,7 @@ name: Sync Bitget → Google Sheets
 on:
   schedule:
     - cron: "*/30 * * * *"   # a cada 30 min
-  workflow_dispatch: {}       # rodar manualmente
+  workflow_dispatch: {}
 
 jobs:
   sync:
@@ -17,7 +17,6 @@ jobs:
 
       - run: pip install -r sync/requirements.txt
 
-      # Debug leve (não imprime secrets)
       - run: |
           echo "=== TREE ==="
           ls -R
@@ -34,6 +33,7 @@ jobs:
           SHEET_ID: ${{ secrets.SHEET_ID }}
           SHEET_TRADES_NAME: ${{ secrets.SHEET_TRADES_NAME }}
           SYMBOLS: ${{ secrets.SYMBOLS }}
-          PRODUCT_TYPE: ${{ secrets.PRODUCT_TYPE }}
-          DRY_RUN: ${{ secrets.DRY_RUN }}
+          # Defaults seguros mesmo se o secret existir vazio:
+          PRODUCT_TYPE: ${{ secrets.PRODUCT_TYPE || 'umcbl' }}
+          DRY_RUN: ${{ secrets.DRY_RUN || '0' }}
         run: python sync/fills_to_sheet.py
