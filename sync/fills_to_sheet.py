@@ -145,9 +145,9 @@ def to_rows_from_fills(fills, sym_clean):
         # size pode vir como size/baseVolume/fillQty/tradeVolume etc.
         raw_size = (f.get("size") or f.get("baseVolume") or f.get("fillQty") or f.get("tradeVolume") or "0")
         try:
-        size = float(raw_size)
+            size = float(raw_size)
         except Exception:
-        size = 0.0
+            size = 0.0
         fee   = float(f.get("fee", 0) or 0)
         pnl   = float(f.get("pnl", 0) or 0)
         tsms  = int(f.get("ctime", f.get("timestamp", int(time.time()*1000))))
